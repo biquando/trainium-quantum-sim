@@ -1,0 +1,212 @@
+from __future__ import annotations
+import numpy as np
+
+from neuronxcc import nki
+import neuronxcc.nki.language as nl
+import neuronxcc.nki.isa as nisa
+
+import qiskit
+
+
+def _kron(*args) -> np.ndarray:
+    mat = np.array([[1]])
+    for arg in args:
+        mat = np.kron(mat, arg)
+    return mat
+
+def _kron_pad(U, left_bits, right_bits) -> np.ndarray:
+    left_bits = max(left_bits, 0)
+    right_bits = max(right_bits, 0)
+    return _kron(
+        np.identity(2**left_bits),
+        U,
+        np.identity(2**right_bits)
+    )
+
+
+class QuantumCircuit:
+    def __init__(self, n_qubits: int, max_gate_size: int = 7, dtype=np.float32):
+        self.n = n_qubits                                  # number of qubits
+        self.N = int(2 ** self.n)                          # length of state vector
+        self.gate_size = min(max_gate_size, n_qubits)      # number of qubits per gate
+        self.unitary_size = int(2 ** self.gate_size)       # size of each gate's unitary
+        self.ntiles = int(2 ** (self.n - self.gate_size))  # number of tiles that we must multiply
+
+        self.dtype = dtype
+
+        # We store gates as a list of tuples with two elements:
+        #  1. complex-valued unitary matrix
+        #  2. qubit indices that the gate acts on
+        # TODO: we can consolidate gates in this representation
+        self.gates: list[tuple[np.ndarray, list[int]]] = []
+
+    # Append a gate to the circuit.
+    # Params:
+    #  - U: unitary matrix, on at most self.gate_size qubits, type=np.complex128
+    #  - qubit_idcs: list of qubits that the gate acts on
+    def append(self, U: np.ndarray, qubit_idcs: list[int]) -> None:
+        # Calculate the number of qubits that U acts on
+        U_nqubits = int(np.floor(np.log2(U.shape[0])))
+
+        # Validate U
+        assert len(U.shape) == 2 and U.shape[0] == U.shape[1]   # square matrix
+        assert 2 ** U_nqubits == U.shape[0]                     # valid 2^m dimensions
+        assert U_nqubits <= self.gate_size                      # below max gate size
+        assert U_nqubits == len(qubit_idcs)                     # correct number of qubits
+
+        self.gates.append((U, qubit_idcs))
+
+    # Import gates from a qiskit.QuantumCircuit
+    @staticmethod
+    def from_qiskit(qiskit_qc: qiskit.QuantumCircuit) -> QuantumCircuit:
+        qc = QuantumCircuit(len(qiskit_qc.qubits))
+
+        for gate in qiskit_qc.data:
+            U = gate.matrix
+            idcs = [qubit._index for qubit in gate.qubits]
+            assert len(idcs) <= qc.gate_size
+
+            qc.append(U, idcs)
+
+        return qc
+
+    # Import gates from a qasm string
+    @staticmethod
+    def from_qasm_str(qasm: str) -> QuantumCircuit:
+        qqc = qiskit.QuantumCircuit.from_qasm_str(qasm)
+        return QuantumCircuit.from_qiskit(qqc)
+
+
+    # Simulate the circuit with initial state |0>.
+    # Returns:
+    #    final state vector of shape (N, 1) with type np.complex128
+    def run(self) -> np.ndarray:
+        # Pre-process gates to match the following format (tuples of three elements):
+        #  1. real part of NxN unitary
+        #  2. imaginary part of NxN unitary
+        #  3. permutation information from QuantumCircuit.get_perm()
+        kernel_gates: list[tuple[np.ndarray, np.ndarray, list[int]]] = []
+
+        for U, qubit_idcs in self.gates:
+            # If U is less than self.gate_size, than we pad it with identities
+            assert len(qubit_idcs) <= self.gate_size
+            U = _kron_pad(U, self.gate_size - len(qubit_idcs), 0)
+
+            kernel_gates.append((
+                U.real.astype(self.dtype),
+                U.imag.astype(self.dtype),
+                QuantumCircuit.get_perm(self.n, qubit_idcs),
+            ))
+
+        # Run kernel
+        state = QuantumCircuit.kernel(kernel_gates,
+                                      self.N,
+                                      self.unitary_size,
+                                      self.ntiles,
+                                      self.dtype)
+
+        # Combine real and imaginary components
+        state = state[0].astype(np.complex128) \
+              + state[1].astype(np.complex128) * 1.0j
+        return state
+
+
+    # Input gates:
+    #  1. real part of NxN unitary
+    #  2. imaginary part of NxN unitary
+    #  3. qubit permutation information from QuantumCircuit.get_perm()
+    # returns: final state vector with separated real/imag components, shape=(2, N, 1)
+    @staticmethod
+    @nki.jit(mode='simulation')
+    def kernel(gates, N, unitary_size, ntiles, dtype) -> np.ndarray:
+        # Initialize state vector to |0>
+        state = nl.ndarray((2, N, 1), dtype=dtype, buffer=nl.shared_hbm)
+        for tile_idx in nl.affine_range(ntiles):
+            nl.store(dst=state[0, tile_idx * unitary_size : (tile_idx+1) * unitary_size, 0], value=0.0)
+            nl.store(dst=state[1, tile_idx * unitary_size : (tile_idx+1) * unitary_size, 0], value=0.0)
+        nl.store(dst=state[0, 0, 0], value=1.0)
+
+        # This just stores [0, 1, 2, ..., 127], for use in indexing
+        tile_idcs_base_range = nl.arange(unitary_size)[:, None]
+        tile_idcs_base = nisa.iota(tile_idcs_base_range, dtype=np.uint32)
+
+        for gate in gates:
+            assert type(gate) == tuple and len(gate) == 3
+            assert gate[0].shape == (unitary_size, unitary_size)
+            assert gate[1].shape == (unitary_size, unitary_size)
+            assert gate[2].shape[1] == 4
+
+            # This is the 128x128 matrix corresponding the current gate
+            U_tile_real = nl.load(gate[0])
+            U_tile_imag = nl.load(gate[1])
+
+            # We apply the matrix to each chunk of the state vector
+            for tile_idx in nl.affine_range(ntiles): # allows for parallel computation
+                offset = tile_idx * unitary_size
+                tile_idcs = nl.add(tile_idcs_base, offset, dtype=np.uint32)
+
+                # Convert the qubit permutation to a statevector permutation using bit operations
+                y = nl.copy(tile_idcs) # permuted tile idcs
+                for i in nl.sequential_range(gate[2].shape[0]):
+                    a  = nl.load(gate[2][i][0])
+                    b  = nl.load(gate[2][i][1])
+                    ma = nl.load(gate[2][i][2]) # 2^a
+                    mb = nl.load(gate[2][i][3]) # 2^b
+
+                    y[:] = nl.bitwise_and(y, nl.invert(mb))
+                    y[:] = nl.bitwise_or(y, nl.left_shift(nl.bitwise_and(tile_idcs, ma), b - a))
+                    y[:] = nl.bitwise_or(y, nl.right_shift(nl.bitwise_and(tile_idcs, ma), a - b))
+
+
+                # *** Load/Multiply/Store (3M) ***
+
+                state_tile_real = nl.load(state[0, y])
+                state_tile_imag = nl.load(state[1, y])
+
+                # See https://www.cs.utexas.edu/~flame/pubs/flawn81.pdf, pg10, eq4
+                W_real = nl.matmul(U_tile_real, state_tile_real)
+                W_imag = nl.matmul(U_tile_imag, state_tile_imag)
+                SASB = nl.matmul(nl.add(U_tile_real, U_tile_imag), nl.add(state_tile_real, state_tile_imag))
+                new_state_tile_real = nl.subtract(W_real, W_imag)
+                new_state_tile_imag = nl.subtract(nl.subtract(SASB, W_real), W_imag)
+
+                nl.store(state[0, y], value=new_state_tile_real)
+                nl.store(state[1, y], value=new_state_tile_imag)
+
+        return state
+
+
+
+    # Helper function in CPU, generates the permutation info required by the kernel.
+    # Args:
+    #  - n: number of qubits
+    #  - gate_idcs: qubit indices that the gate acts on (qiskit format)
+    # Returns:
+    #    List of src/dst qubit index pairs, shape = (m, 4).
+    #    For efficiency, each row has the following numbers:
+    #     - src
+    #     - dst
+    #     - 2^src
+    #     - 2^dst
+    @staticmethod
+    def get_perm(n: int, gate_idcs: list[int]) -> list[np.ndarray]:
+        perm = list(range(n))
+        locs = list(range(n))
+        for i, idx in enumerate(gate_idcs):
+            if perm[i] != idx:
+                # Swap idx elem in perm to i in perm
+                loc_idx = locs[idx]
+                perm[i], perm[loc_idx] = perm[loc_idx], perm[i]
+                locs[perm[i]] = i
+                locs[perm[loc_idx]] = loc_idx
+
+        movements = []
+        for i, idx in enumerate(perm):
+            if i != idx:
+                movements.append([i, idx])
+        if len(movements) == 0:
+            return np.array([[0, 0, 1, 1]], dtype=np.uint32)
+
+        movements_arr = np.array(movements, dtype=np.uint32)
+        return np.concatenate((movements_arr, np.left_shift(1, movements_arr)),
+                              axis=1)

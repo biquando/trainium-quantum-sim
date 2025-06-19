@@ -53,7 +53,6 @@ def get_perm(n, gate_idcs):
                           axis=1)
 
 
-# initial_state: numpy array state vector with 2^n elements
 # gates: list of tuples
 #            - first element of tuple is the real component of the matrix
 #            - second element of tuple is the imaginary component of the matrix
