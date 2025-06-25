@@ -6,6 +6,8 @@ import neuronxcc.nki.language as nl
 import neuronxcc.nki.isa as nisa
 
 import qiskit
+from qiskit.circuit.library import UnitaryGate
+from qiskit.quantum_info import Operator
 
 
 def _kron(*args) -> np.ndarray:
@@ -81,12 +83,13 @@ class QuantumCircuit:
     # Returns:
     #    final state vector of shape (N, 1) with type np.complex128
     def run(self) -> np.ndarray:
+        self.consolidate()
+
         # Pre-process gates to match the following format (tuples of three elements):
         #  1. real part of NxN unitary
         #  2. imaginary part of NxN unitary
         #  3. permutation information from QuantumCircuit.get_perm()
         kernel_gates: list[tuple[np.ndarray, np.ndarray, list[int]]] = []
-
         for U, qubit_idcs in self.gates:
             # If U is less than self.gate_size, than we pad it with identities
             assert len(qubit_idcs) <= self.gate_size
@@ -210,3 +213,62 @@ class QuantumCircuit:
         movements_arr = np.array(movements, dtype=np.uint32)
         return np.concatenate((movements_arr, np.left_shift(1, movements_arr)),
                               axis=1)
+
+    # Basic gate consolidation algorithm.
+    # We just keep combining gates until we go over seven qubits
+    def consolidate(self):
+        gates = []
+
+        curr_gate = qiskit.QuantumCircuit(self.gate_size)
+        curr_idcs = []
+        curr_idcs_inv = {}
+
+        def flush_gate():
+            nonlocal curr_idcs, curr_idcs_inv, curr_gate
+
+            # Add qubits until the curr_gate size reaches self.gate_size
+            for i in range(self.n):
+                if len(curr_idcs) == self.gate_size:
+                    break
+                if i in curr_idcs:
+                    continue
+                curr_idcs.append(i)
+            assert len(curr_idcs) == self.gate_size
+
+            # Convert curr_gate (a qiskit circuit) to a unitary matrix
+            gates.append((Operator(curr_gate).data, curr_idcs))
+
+            curr_gate = qiskit.QuantumCircuit(self.gate_size)
+            curr_idcs = []
+            curr_idcs_inv = {}
+
+        for U, idcs in self.gates:
+
+            if set(idcs) <= set(curr_idcs):
+                ### we can consolidate in the current gate
+                curr_gate.append(UnitaryGate(U), [curr_idcs_inv[i] for i in idcs])
+
+            elif len(set(idcs) - set(curr_idcs)) <= self.gate_size - len(curr_idcs):
+                ### we can add to the current gate
+                for idx in idcs:
+                    if idx not in curr_idcs:
+                        curr_idcs_inv[idx] = len(curr_idcs)
+                        curr_idcs.append(idx)
+                curr_gate.append(UnitaryGate(U), [curr_idcs_inv[i] for i in idcs])
+
+            else:
+                ### we must flush the current gate
+                flush_gate()
+                curr_idcs = []
+                curr_idcs_inv = {}
+                curr_gate = qiskit.QuantumCircuit(self.gate_size)
+
+                for idx in idcs:
+                    if idx not in curr_idcs:
+                        curr_idcs_inv[idx] = len(curr_idcs)
+                        curr_idcs.append(idx)
+                curr_gate.append(UnitaryGate(U), [curr_idcs_inv[i] for i in idcs])
+
+        flush_gate()
+
+        self.gates = gates
