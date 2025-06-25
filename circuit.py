@@ -223,6 +223,16 @@ class QuantumCircuit:
         curr_idcs = []
         curr_idcs_inv = {}
 
+        # Consolidate the gate described by (U, idcs) into curr_gate
+        def add_to_gate(U, idcs):
+            for idx in idcs:
+                if idx not in curr_idcs:
+                    curr_idcs_inv[idx] = len(curr_idcs)
+                    curr_idcs.append(idx)
+            assert len(curr_idcs) <= self.gate_size
+            curr_gate.append(UnitaryGate(U), [curr_idcs_inv[i] for i in idcs])
+
+        # Add curr_gate to the output list of gates, and reset it back to identity
         def flush_gate():
             nonlocal curr_idcs, curr_idcs_inv, curr_gate
 
@@ -243,31 +253,10 @@ class QuantumCircuit:
             curr_idcs_inv = {}
 
         for U, idcs in self.gates:
-
-            if set(idcs) <= set(curr_idcs):
-                ### we can consolidate in the current gate
-                curr_gate.append(UnitaryGate(U), [curr_idcs_inv[i] for i in idcs])
-
-            elif len(set(idcs) - set(curr_idcs)) <= self.gate_size - len(curr_idcs):
-                ### we can add to the current gate
-                for idx in idcs:
-                    if idx not in curr_idcs:
-                        curr_idcs_inv[idx] = len(curr_idcs)
-                        curr_idcs.append(idx)
-                curr_gate.append(UnitaryGate(U), [curr_idcs_inv[i] for i in idcs])
-
-            else:
-                ### we must flush the current gate
+            can_consolidate = len(set(idcs) - set(curr_idcs)) <= self.gate_size - len(curr_idcs)
+            if not can_consolidate:
                 flush_gate()
-                curr_idcs = []
-                curr_idcs_inv = {}
-                curr_gate = qiskit.QuantumCircuit(self.gate_size)
-
-                for idx in idcs:
-                    if idx not in curr_idcs:
-                        curr_idcs_inv[idx] = len(curr_idcs)
-                        curr_idcs.append(idx)
-                curr_gate.append(UnitaryGate(U), [curr_idcs_inv[i] for i in idcs])
+            add_to_gate(U, idcs)
 
         flush_gate()
 
