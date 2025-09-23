@@ -26,13 +26,13 @@ CX = np.array([
 
 
 def test_from_numpy():
-    n = 10
-    qc = circuit.QuantumCircuit(n)
+    n = 17
+    qc = circuit.QuantumCircuit(n, batch_size=512)
     qc.append(H, [0])
     for i in range(1, n):
         qc.append(CX, [0, i])
 
-    state = qc.run()
+    state = qc.run(consolidate=False)
     print(state)
 
 def test_from_qiskit():
@@ -137,19 +137,42 @@ def test_consolidation():
     diff = kernel_state - qiskit_state[:, None]
     print('Distance between state vectors:', np.linalg.norm(diff))
 
+def test_timing():
+    n = 10
+    gate_size = 7
+    ngates = 5
+
+    print(f'num qubits = {n}')
+    print(f'num gates = {ngates}')
+
+    unitary_mats = scipy.stats.unitary_group(dim=2**gate_size, seed=0)
+
+    qc = circuit.QuantumCircuit(n, gate_size)
+    for _ in range(ngates):
+        U = unitary_mats.rvs().astype(np.complex128)
+        idcs = np.random.choice(range(n), size=gate_size, replace=False)
+        qc.append(U, idcs)
+
+    state = qc.run(consolidate=False)
+    print(state)
+
+
 
 if __name__ == '__main__':
     print('\n=== Test: GHZ circuit from numpy unitaries ===')
     test_from_numpy()
 
-    print('\n=== Test: GHZ circuit imported from qiskit ===')
-    test_from_qiskit()
+    # print('\n=== Test: GHZ circuit imported from qiskit ===')
+    # test_from_qiskit()
 
-    print('\n=== Test: GHZ circuit imported from qasm ===')
-    test_from_qasm()
+    # print('\n=== Test: GHZ circuit imported from qasm ===')
+    # test_from_qasm()
 
-    print('\n=== Test: correctness (comparison with qiskit) ===')
-    test_correctness()
+    # print('\n=== Test: correctness (comparison with qiskit) ===')
+    # test_correctness()
 
-    print('\n=== Test: consolidation ===')
-    test_consolidation()
+    # print('\n=== Test: consolidation ===')
+    # test_consolidation()
+
+    # print('\n=== Test: timing ===')
+    # test_timing()
