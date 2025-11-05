@@ -26,7 +26,7 @@ CX = np.array([
 
 
 def test_from_numpy():
-    n = 17
+    n = 20
     qc = circuit.QuantumCircuit(n, batch_size=512)
     qc.append(H, [0])
     for i in range(1, n):

@@ -183,7 +183,7 @@ class QuantumCircuit:
     #  3. qubit permutation information from QuantumCircuit.get_perm()
     # returns: final state vector with separated real/imag components, shape=(2, N, 1)
     @staticmethod
-    @nki.compiler.skip_middle_end_transformations
+    # @nki.compiler.skip_middle_end_transformations
     @nki.jit
     # @nki.profile(working_directory="/home/ubuntu/profiles", save_neff_name='file.neff', save_trace_name='profile.ntff')
     def kernel(unitaries, idcs, N, unitary_size, ntiles, batch_size, base):
@@ -218,7 +218,7 @@ class QuantumCircuit:
                 # Convert the qubit permutation to a statevector permutation using bit operations
                 y = nl.copy(tile_idcs) # permuted tile idcs
                 for i in nl.sequential_range(gate[2].shape[0]):
-                    params = nl.load(gate[2][i])
+                    # params = nl.load(gate[2][i])
                     a  = nl.load(gate[2][i][0])
                     b  = nl.load(gate[2][i][1])
                     ma = nl.load(gate[2][i][2]) # 2^a
