@@ -66,7 +66,7 @@ class QuantumCircuit:
 
     # Import gates from a qiskit.QuantumCircuit
     @staticmethod
-    def from_qiskit(qiskit_qc: qiskit.QuantumCircuit) -> QuantumCircuit:
+    def from_qiskit(qiskit_qc: qiskit.QuantumCircuit, dtype=np.float32) -> QuantumCircuit:
         qc = QuantumCircuit(len(qiskit_qc.qubits))
 
         for gate in qiskit_qc.data:
